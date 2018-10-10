@@ -65,6 +65,7 @@ func (w *watcher) initialSync(c *clientv3.Client) int {
 	resp, err := c.Get(clientv3.WithRequireLeader(context.Background()), w.prefix, clientv3.WithPrefix())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initial sync failed for prefix %s root %s: %s\n", w.prefix, w.root, err)
+		return 0
 	}
 	cnt := 0
 	for _, kv := range resp.Kvs {
