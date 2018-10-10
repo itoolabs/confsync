@@ -73,8 +73,11 @@ func (w *watcher) initialSync(c *clientv3.Client) int {
 		if path.Base(key) == ".hash" {
 			continue
 		}
-		if updated, err := w.maybeUpdateFile(path.Join(w.root, key), kv.Value); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to synchronize file %s: %s\n", key, err)
+		fn := filepath.Join(w.root, key)
+		if data, err := snappy.Decode(nil, kv.Value); err != nil {
+			fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
+		} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to synchronize file %s: %s\n", fn, err)
 		} else if updated {
 			cnt++
 		}
