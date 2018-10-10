@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/bgentry/speakeasy"
-	"github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/pkg/srv"
-	"github.com/coreos/etcd/pkg/transport"
+	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/pkg/srv"
+	"go.etcd.io/etcd/pkg/transport"
 	"os"
 	"strings"
 )
@@ -27,7 +27,7 @@ func mustClient() *clientv3.Client {
 				if strings.HasPrefix("http://", eps[i]) {
 					fmt.Fprintf(os.Stderr, "ignoring discovered insecure endpoint %q\n", eps[i])
 					copy(eps[i:], eps[i+1:])
-					eps = eps[:len(eps) - 1]
+					eps = eps[:len(eps)-1]
 				} else {
 					i++
 				}
@@ -40,9 +40,9 @@ func mustClient() *clientv3.Client {
 		eps = []string{"127.0.0.1:2379"}
 	}
 	cfg := clientv3.Config{
-		Endpoints: eps,
-		DialTimeout: globals.dialTimeout,
-		DialKeepAliveTime: globals.keepAliveTime,
+		Endpoints:            eps,
+		DialTimeout:          globals.dialTimeout,
+		DialKeepAliveTime:    globals.keepAliveTime,
 		DialKeepAliveTimeout: globals.keepAliveTimeout,
 	}
 	var (

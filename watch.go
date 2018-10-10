@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/coreos/etcd/clientv3"
 	"github.com/golang/snappy"
 	"github.com/spf13/cobra"
+	"go.etcd.io/etcd/clientv3"
 	"io"
 	"io/ioutil"
 	"os"
@@ -49,10 +49,10 @@ type watcher struct {
 
 func (w *watcher) runCmd() {
 	cmd := exec.Cmd{
-		Path: w.cmd,
-		Args: w.args,
-		Dir:  w.root,
-		Env:  os.Environ(),
+		Path:   w.cmd,
+		Args:   w.args,
+		Dir:    w.root,
+		Env:    os.Environ(),
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
 	}
@@ -121,7 +121,7 @@ func maybeRemoveDir(path string) (bool, error) {
 	defer df.Close()
 	if dn, err := df.Readdirnames(1); err != nil && err != io.EOF {
 		return false, fmt.Errorf("error reading dir %s: %s", path, err)
-	} else if len(dn) != 0{
+	} else if len(dn) != 0 {
 		return false, nil
 	} else if err = syscall.Rmdir(path); err != nil {
 		return false, fmt.Errorf("error removing dir %s: %s", path, err)
@@ -166,11 +166,11 @@ func (w *watcher) run(c *clientv3.Client, wg *sync.WaitGroup) {
 				}
 			} else if ev.Type == clientv3.EventTypePut {
 				if data, err := snappy.Decode(nil, ev.Kv.Value); err != nil {
-					fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", err)
+					fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
 				} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
 					fmt.Fprintln(os.Stderr, err.Error())
 				} else if updated {
-					cnt ++
+					cnt++
 				}
 			}
 		}
@@ -185,9 +185,12 @@ func watchCommandFunc(cmd *cobra.Command, args []string) error {
 	for len(args) > 0 {
 	Outer:
 		switch len(args) {
-		case 0: return errors.New("empty watcher definition (trailing --?)")
-		case 1: return errors.New("watcher root directory missing")
-		case 2: return errors.New("watcher command missing")
+		case 0:
+			return errors.New("empty watcher definition (trailing --?)")
+		case 1:
+			return errors.New("watcher root directory missing")
+		case 2:
+			return errors.New("watcher command missing")
 		}
 		cmd, err := exec.LookPath(args[2])
 		if err != nil {

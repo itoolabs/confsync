@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/coreos/etcd/client"
-	"github.com/coreos/etcd/clientv3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.etcd.io/etcd/client"
+	"go.etcd.io/etcd/clientv3"
 	"google.golang.org/grpc/grpclog"
 	"io/ioutil"
 	"os"
@@ -40,14 +40,14 @@ var (
 		insecure           bool
 		insecureDiscovery  bool
 		insecureSkipVerify bool
-		debug bool
+		debug              bool
 		tls                struct {
-			certFile   string
-			keyFile    string
-			caFile     string
+			certFile string
+			keyFile  string
+			caFile   string
 		}
 		serviceName string
-		user string
+		user        string
 	}{}
 )
 
@@ -55,7 +55,6 @@ func init() {
 	rootCmd.PersistentFlags().StringSliceVarP(&globals.endpoints, "endpoints", "e", nil, "list of gRPC `endpoints`")
 	rootCmd.PersistentFlags().StringVarP(&globals.serviceName, "domain", "d", "", "domain `name` to query for SRV records or to verify TLS-enabled secure servers against")
 	rootCmd.PersistentFlags().StringVar(&globals.serviceName, "discovery-srv", "", "domain `name`, the same as --domain (to keep compatible with ETCDCTL_ variables)")
-
 
 	rootCmd.PersistentFlags().BoolVar(&globals.debug, "debug", false, "enable client-side debug logging")
 
@@ -91,7 +90,7 @@ func fail(err error) {
 }
 
 func main() {
-	rootCmd.PersistentFlags().VisitAll(func (f *pflag.Flag) {
+	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
 		envName := "ETCDCTL_" + strings.ToUpper(strings.Replace(f.Name, "-", "_", -1))
 		if envValue := os.Getenv(envName); envValue != "" {
 			if err := f.Value.Set(envValue); err != nil {

@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
-	"github.com/coreos/etcd/clientv3"
 	"github.com/golang/snappy"
 	"github.com/monochromegane/go-gitignore"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/sha3"
+	"go.etcd.io/etcd/clientv3"
 	"hash"
 	"io"
 	"io/ioutil"
@@ -46,7 +46,7 @@ confsync put /etc/firewall/keepalived .
 }
 
 type confIgnoreMatcher struct {
-	gitIgnore gitignore.IgnoreMatcher
+	gitIgnore  gitignore.IgnoreMatcher
 	confIgnore gitignore.IgnoreMatcher
 }
 
@@ -101,7 +101,7 @@ func (tim *treeIgnoreMatcher) Match(path string, isDir bool) bool {
 	dir := path
 	for dir != "" {
 		dir = filepath.Dir(dir)
-		if dir == "." || dir == "/"{
+		if dir == "." || dir == "/" {
 			dir = ""
 		}
 		if cim, ok := tim.local[dir]; ok {
@@ -116,7 +116,7 @@ func (tim *treeIgnoreMatcher) Match(path string, isDir bool) bool {
 }
 
 func newHash() hash.Hash {
-	return sha3.New224()
+	return sha512.New512_224()
 }
 
 func putCommandFunc(cmd *cobra.Command, args []string) error {
@@ -152,10 +152,10 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 		return err
 	}
 	var (
-		tree = make(map[string]bool)
-		ops = make([]clientv3.Op, 0, 8)
-	    opsDesc = make([]opDesc, 0, 8)
-	    gi = newTreeIgnoreMatcher()
+		tree    = make(map[string]bool)
+		ops     = make([]clientv3.Op, 0, 8)
+		opsDesc = make([]opDesc, 0, 8)
+		gi      = newTreeIgnoreMatcher()
 	)
 	for _, kv := range resp.Kvs {
 		key := string(kv.Key)
@@ -173,39 +173,36 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 			if info.Name() == ".git" {
 				return filepath.SkipDir
 			} else if gi.Match(p, true) {
-
 				return filepath.SkipDir
-			} else {
-				gi.addPath(p, p)
 			}
-			return nil
-		} else {
-			if info.Name() == ".gitignore" || info.Name() == ".confignore" || gi.Match(p, false) {
-				return nil
-			}
-			data, digest, err := getFile(p)
-			if err != nil {
-				return fmt.Errorf("error reading file %s: %s", p, err)
-			}
-			rel, _ := filepath.Rel(root, p)
-			key := path.Join(prefix, rel)
-			hashKey := path.Join(key, ".hash")
-			delete(tree, key)
-			ops = append(ops, clientv3.OpTxn(
-				[]clientv3.Cmp{
-					clientv3.Compare(clientv3.CreateRevision(key), "!=", 0),
-					clientv3.Compare(clientv3.CreateRevision(hashKey), "!=", 0),
-					clientv3.Compare(clientv3.Value(hashKey), "=", string(digest)),
-				},
-				[]clientv3.Op{},
-				[]clientv3.Op{
-					clientv3.OpPut(key, string(data)),
-					clientv3.OpPut(hashKey, string(digest)),
-				},
-			))
-			opsDesc = append(opsDesc, opDesc{path: key})
+			gi.addPath(p, p)
 			return nil
 		}
+		if info.Name() == ".gitignore" || info.Name() == ".confignore" || gi.Match(p, false) {
+			return nil
+		}
+		data, digest, err := getFile(p)
+		if err != nil {
+			return fmt.Errorf("error reading file %s: %s", p, err)
+		}
+		rel, _ := filepath.Rel(root, p)
+		key := path.Join(prefix, rel)
+		hashKey := path.Join(key, ".hash")
+		delete(tree, key)
+		ops = append(ops, clientv3.OpTxn(
+			[]clientv3.Cmp{
+				clientv3.Compare(clientv3.CreateRevision(key), "!=", 0),
+				clientv3.Compare(clientv3.CreateRevision(hashKey), "!=", 0),
+				clientv3.Compare(clientv3.Value(hashKey), "=", string(digest)),
+			},
+			[]clientv3.Op{},
+			[]clientv3.Op{
+				clientv3.OpPut(key, string(data)),
+				clientv3.OpPut(hashKey, string(digest)),
+			},
+		))
+		opsDesc = append(opsDesc, opDesc{path: key})
+		return nil
 	}); err != nil {
 		return err
 	}
