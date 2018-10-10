@@ -16,11 +16,12 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 func newPutCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "put [flags] <prefix> <directory>",
+		Use:   "put [flags] <prefix> [<directory>]",
 		Short: "Synchronizes the content of given directory to the store",
 		Long: `Synchronizes the content of given directory to the etcd store under some prefix key namespace.
 
@@ -34,13 +35,15 @@ put command updates files in a single transaction. Since etcd limits both number
 transaction and request limit, put command can handle about 40 files of totals size about 1 Mb (which
 should be enough for most services).
 
+If no directory given, put will synchronize content of current one.
+
 Example:
 
-confsync put /etc/firewall/keepalived .
+confsync put /etc/firewall/keepalived
 
 `,
 		RunE: putCommandFunc,
-		Args: cobra.ExactArgs(2),
+		Args: cobra.RangeArgs(1, 2),
 	}
 	return cmd
 }
@@ -63,12 +66,14 @@ func (l *confIgnoreMatcher) Match(path string, isDir bool) bool {
 }
 
 type treeIgnoreMatcher struct {
+	root   string
 	global gitignore.IgnoreMatcher
 	local  map[string]confIgnoreMatcher
 }
 
-func newTreeIgnoreMatcher() *treeIgnoreMatcher {
+func newTreeIgnoreMatcher(root string) *treeIgnoreMatcher {
 	var im = &treeIgnoreMatcher{
+		root: root,
 		local: make(map[string]confIgnoreMatcher),
 	}
 	if u, err := user.Current(); err == nil {
@@ -79,7 +84,12 @@ func newTreeIgnoreMatcher() *treeIgnoreMatcher {
 	return im
 }
 
-func (tim *treeIgnoreMatcher) addPath(path, rel string) {
+func (tim *treeIgnoreMatcher) addPath(path string) {
+	if rel, err := filepath.Rel(tim.root, path); err != nil || strings.HasPrefix(rel, "../") {
+		return
+	} else {
+		path = rel
+	}
 	cim := confIgnoreMatcher{}
 	fp := filepath.Join(path, ".confignore")
 	if fi, err := os.Stat(fp); err == nil && !fi.IsDir() {
@@ -90,7 +100,7 @@ func (tim *treeIgnoreMatcher) addPath(path, rel string) {
 		cim.gitIgnore, _ = gitignore.NewGitIgnore(fp, ".")
 	}
 	if cim.confIgnore != nil || cim.gitIgnore != nil {
-		tim.local[rel] = cim
+		tim.local[path] = cim
 	}
 }
 
@@ -98,16 +108,16 @@ func (tim *treeIgnoreMatcher) Match(path string, isDir bool) bool {
 	if tim.global != nil && tim.global.Match(path, isDir) {
 		return true
 	}
+	if rel, err := filepath.Rel(tim.root, path); err != nil || rel == "." || strings.HasPrefix(rel, "../") {
+		return false
+	} else {
+		path = rel
+	}
 	dir := path
-	for dir != "" {
+	for dir != "." && dir != "/" {
 		dir = filepath.Dir(dir)
-		if dir == "." || dir == "/" {
-			dir = ""
-		}
 		if cim, ok := tim.local[dir]; ok {
-			if rp, err := filepath.Rel(dir, path); err != nil {
-				return false
-			} else if cim.Match(rp, isDir) {
+			if cim.Match(path, isDir) {
 				return true
 			}
 		}
@@ -120,7 +130,11 @@ func newHash() hash.Hash {
 }
 
 func putCommandFunc(cmd *cobra.Command, args []string) error {
-	return updateTreeRecursively(mustClient(), args[0], args[1])
+	var root string
+	if len(args) > 1 {
+		root = args[1]
+	}
+	return updateTreeRecursively(mustClient(), args[0], root)
 }
 
 func getFile(path string) (data, hash []byte, err error) {
@@ -147,26 +161,34 @@ type opDesc struct {
 }
 
 func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
-	resp, err := c.Get(context.Background(), path.Join(prefix, "/"), clientv3.WithPrefix(), clientv3.WithKeysOnly())
-	if err != nil {
-		return err
-	}
 	var (
 		tree    = make(map[string]bool)
 		ops     = make([]clientv3.Op, 0, 8)
 		opsDesc = make([]opDesc, 0, 8)
-		gi      = newTreeIgnoreMatcher()
+		gi      *treeIgnoreMatcher
+		cwd     string
+		err     error
 	)
+	if cwd, err = os.Getwd(); err != nil {
+		return fmt.Errorf("error getting current directory: %s", err)
+	}
+	resp, err := c.Get(context.Background(), path.Join(prefix, "/"), clientv3.WithPrefix(), clientv3.WithKeysOnly())
+	if err != nil {
+		return err
+	}
 	for _, kv := range resp.Kvs {
 		key := string(kv.Key)
 		if path.Base(key) != ".hash" {
 			tree[string(kv.Key)] = true
 		}
 	}
-	if !filepath.IsAbs(root) {
-		if cwd, err := os.Getwd(); err == nil {
-			gi.addPath(cwd, "")
-		}
+	if root == "" {
+		root = cwd
+		gi = newTreeIgnoreMatcher(root)
+	} else if !filepath.IsAbs(root) {
+		root = filepath.Join(cwd, root)
+		gi = newTreeIgnoreMatcher(cwd)
+		gi.addPath(cwd)
 	}
 	if err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if info.IsDir() {
@@ -175,7 +197,7 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 			} else if gi.Match(p, true) {
 				return filepath.SkipDir
 			}
-			gi.addPath(p, p)
+			gi.addPath(p)
 			return nil
 		}
 		if info.Name() == ".gitignore" || info.Name() == ".confignore" || gi.Match(p, false) {
@@ -186,8 +208,8 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 			return fmt.Errorf("error reading file %s: %s", p, err)
 		}
 		rel, _ := filepath.Rel(root, p)
-		key := path.Join(prefix, rel)
-		hashKey := path.Join(key, ".hash")
+		key := filepath.Join(prefix, rel)
+		hashKey := filepath.Join(key, ".hash")
 		delete(tree, key)
 		ops = append(ops, clientv3.OpTxn(
 			[]clientv3.Cmp{
@@ -207,15 +229,18 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 		return err
 	}
 	for key := range tree {
-		ops = append(ops, clientv3.OpTxn(
-			[]clientv3.Cmp{},
-			[]clientv3.Op{
-				clientv3.OpDelete(key),
-				clientv3.OpDelete(path.Join(key, ".hash")),
-			},
-			[]clientv3.Op{},
-		))
-		opsDesc = append(opsDesc, opDesc{path: key, isDel: true})
+		rel, _ := filepath.Rel(prefix, key)
+		if !gi.Match(filepath.Join(root, rel), false) {
+			ops = append(ops, clientv3.OpTxn(
+				[]clientv3.Cmp{},
+				[]clientv3.Op{
+					clientv3.OpDelete(key),
+					clientv3.OpDelete(path.Join(key, ".hash")),
+				},
+				[]clientv3.Op{},
+			))
+			opsDesc = append(opsDesc, opDesc{path: key, isDel: true})
+		}
 	}
 	tresp, err := c.Txn(context.Background()).If().Then(ops...).Commit()
 	if err != nil {
