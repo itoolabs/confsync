@@ -86,7 +86,7 @@ func (w *watcher) initialSync(c *clientv3.Client) int {
 }
 
 func (w *watcher) maybeUpdateFile(path string, content []byte) (bool, error) {
-	var p string
+	var p = filepath.Dir(path)
 	if fi, err := os.Stat(path); err == nil {
 		if fi.IsDir() {
 			return false, fmt.Errorf("error updating file: %s is a direcotry", path)
@@ -96,7 +96,6 @@ func (w *watcher) maybeUpdateFile(path string, content []byte) (bool, error) {
 			}
 		}
 	} else {
-		p = filepath.Dir(path)
 		if fi, err := os.Stat(p); err == nil {
 			if !fi.IsDir() {
 				return false, fmt.Errorf("error updating %s: %s is not a directory", path, p)
