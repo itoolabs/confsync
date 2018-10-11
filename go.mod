@@ -21,11 +21,11 @@ require (
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/jonboulle/clockwork v0.1.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
-	github.com/monochromegane/go-gitignore v0.0.0-20160105113617-38717d0a108c
 	github.com/prometheus/client_golang v0.8.0 // indirect
 	github.com/prometheus/client_model v0.0.0-20180712105110-5c3871d89910 // indirect
 	github.com/prometheus/common v0.0.0-20180801064454-c7de2306084e // indirect
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect
+	github.com/sabhiram/go-gitignore v0.0.0-20180611051255-d3107576ba94
 	github.com/sirupsen/logrus v1.1.1 // indirect
 	github.com/soheilhy/cmux v0.1.4 // indirect
 	github.com/spf13/cobra v0.0.3

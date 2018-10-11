@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/golang/snappy"
-	"github.com/monochromegane/go-gitignore"
+	"github.com/sabhiram/go-gitignore"
 	"github.com/spf13/cobra"
 	"go.etcd.io/etcd/clientv3"
 	"hash"
@@ -49,16 +49,16 @@ confsync put /etc/firewall/keepalived
 }
 
 type confIgnoreMatcher struct {
-	gitIgnore  gitignore.IgnoreMatcher
-	confIgnore gitignore.IgnoreMatcher
+	gitIgnore  *ignore.GitIgnore
+	confIgnore *ignore.GitIgnore
 }
 
-func (l *confIgnoreMatcher) Match(path string, isDir bool) bool {
+func (l *confIgnoreMatcher) MatchesPath(path string) bool {
 	if l == nil {
 		return false
-	} else if l.gitIgnore != nil && l.gitIgnore.Match(path, isDir) {
+	} else if l.gitIgnore != nil && l.gitIgnore.MatchesPath(path) {
 		return true
-	} else if l.confIgnore != nil && l.confIgnore.Match(path, isDir) {
+	} else if l.confIgnore != nil && l.confIgnore.MatchesPath(path) {
 		return true
 	} else {
 		return false
@@ -67,7 +67,7 @@ func (l *confIgnoreMatcher) Match(path string, isDir bool) bool {
 
 type treeIgnoreMatcher struct {
 	root   string
-	global gitignore.IgnoreMatcher
+	global *ignore.GitIgnore
 	local  map[string]confIgnoreMatcher
 }
 
@@ -77,7 +77,7 @@ func newTreeIgnoreMatcher(root string) *treeIgnoreMatcher {
 		local: make(map[string]confIgnoreMatcher),
 	}
 	if u, err := user.Current(); err == nil {
-		if gi, err := gitignore.NewGitIgnore(path.Join(u.HomeDir, ".gitignore_global"), "."); err == nil {
+		if gi, err := ignore.CompileIgnoreFile(path.Join(u.HomeDir, ".gitignore_global")); err == nil {
 			im.global = gi
 		}
 	}
@@ -85,41 +85,53 @@ func newTreeIgnoreMatcher(root string) *treeIgnoreMatcher {
 }
 
 func (tim *treeIgnoreMatcher) addPath(path string) {
-	if rel, err := filepath.Rel(tim.root, path); err != nil || strings.HasPrefix(rel, "../") {
+	var (
+		rel string
+		err error
+	)
+	if rel, err = filepath.Rel(tim.root, path); err != nil || strings.HasPrefix(rel, "../") {
 		return
-	} else {
-		path = rel
 	}
 	cim := confIgnoreMatcher{}
 	fp := filepath.Join(path, ".confignore")
 	if fi, err := os.Stat(fp); err == nil && !fi.IsDir() {
-		cim.confIgnore, _ = gitignore.NewGitIgnore(fp, ".")
+		cim.confIgnore, err = ignore.CompileIgnoreFile(fp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error compiling ignore file %s: %s\n", fp, err)
+		}
 	}
 	fp = filepath.Join(path, ".gitignore")
 	if fi, err := os.Stat(fp); err == nil && !fi.IsDir() {
-		cim.gitIgnore, _ = gitignore.NewGitIgnore(fp, ".")
+		cim.gitIgnore, _ = ignore.CompileIgnoreFile(fp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error compiling ignore file %s: %s\n", fp, err)
+		}
 	}
 	if cim.confIgnore != nil || cim.gitIgnore != nil {
-		tim.local[path] = cim
+		tim.local[rel] = cim
 	}
 }
 
 func (tim *treeIgnoreMatcher) Match(path string, isDir bool) bool {
-	if tim.global != nil && tim.global.Match(path, isDir) {
+	if tim.global != nil && tim.global.MatchesPath(path) {
 		return true
 	}
-	if rel, err := filepath.Rel(tim.root, path); err != nil || rel == "." || strings.HasPrefix(rel, "../") {
+	rel, err := filepath.Rel(tim.root, path)
+	if err != nil || strings.HasPrefix(rel, "../") {
 		return false
 	} else {
 		path = rel
 	}
 	dir := path
-	for dir != "." && dir != "/" {
+	for {
 		dir = filepath.Dir(dir)
 		if cim, ok := tim.local[dir]; ok {
-			if cim.Match(path, isDir) {
+			if cim.MatchesPath(path) {
 				return true
 			}
+		}
+		if dir == "." || dir == "/" {
+			break
 		}
 	}
 	return false
@@ -185,10 +197,18 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 	if root == "" {
 		root = cwd
 		gi = newTreeIgnoreMatcher(root)
-	} else if !filepath.IsAbs(root) {
+	} else if filepath.IsAbs(root) {
+		gi = newTreeIgnoreMatcher(root)
+	} else {
 		root = filepath.Join(cwd, root)
-		gi = newTreeIgnoreMatcher(cwd)
-		gi.addPath(cwd)
+		if rel, err := filepath.Rel(cwd, root); err != nil {
+			return fmt.Errorf("error getting source directory: %s", err)
+		} else if strings.HasPrefix(rel, "../") {
+			gi = newTreeIgnoreMatcher(root)
+		} else {
+			gi = newTreeIgnoreMatcher(cwd)
+			gi.addPath(cwd)
+		}
 	}
 	if err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if info.IsDir() {
