@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +34,7 @@ var (
 
 func newWatchCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "watch [flags] [-- <prefix> <root> <command> [<arg> ...] ]+",
+		Use:   "watch [flags] [-- <prefix> <root[:owner[:group[:mode]]]> <command> [<arg> ...] ]+",
 		Short: "watches for changes in the story, synchronise with local file system and runs a command",
 		Long: `watch command sets up a number of watchers waiting for changes under the prefix key,
 synchronise store content to the local directory, and runs a local command (presumably, to reload 
@@ -59,10 +61,13 @@ confsync watch --prefix /etc/firewall --ka-fifo /run/ka --ka-instance master --k
 }
 
 type watcher struct {
-	prefix string
-	root   string
-	cmd    string
-	args   []string
+	prefix    string
+	root      string
+	rootOwner int
+	rootGroup int
+	rootMask  int
+	cmd       string
+	args      []string
 }
 
 func (w *watcher) runCmd() {
@@ -111,6 +116,55 @@ func (w *watcher) initialSync(c *clientv3.Client) int {
 	return cnt
 }
 
+func mkdirAll(path string, owner, group, mode int) error {
+	if mode == -1 {
+		mode = 0755
+	} else {
+		for i := 0; i < 3; i++ {
+			if (mode & 4 << uint(i * 3)) != 0 {
+				mode |= 1 << uint(i * 3)
+			}
+		}
+	}
+	dir, err := os.Stat(path)
+	if err == nil {
+		if dir.IsDir() {
+			return nil
+		}
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	elts := make([]string, 1, 8)
+	elts[0] = path
+	d := path
+	for {
+		d = filepath.Dir(d)
+		if d == "." || d == "/" {
+			break
+		}
+		dir, err = os.Stat(d)
+		if err == nil {
+			if dir.IsDir() {
+				break
+			} else {
+				return fmt.Errorf("%s is not a directory", d)
+			}
+		}
+		elts = append(elts, d)
+	}
+	for i := len(elts) - 1; i >= 0; i-- {
+		err = os.Mkdir(elts[i], os.FileMode(mode))
+		if err != nil {
+			return fmt.Errorf("error creating directory %s: %s", elts[i], err)
+		}
+		if owner >= 0 {
+			if err = os.Chown(elts[i], owner, group); err != nil {
+				return fmt.Errorf("error chown %s: %s", elts[i], err)
+			}
+		}
+	}
+	return nil
+}
+
 func (w *watcher) maybeUpdateFile(path string, content []byte) (bool, error) {
 	var p = filepath.Dir(path)
 	if fi, err := os.Stat(path); err == nil {
@@ -126,18 +180,33 @@ func (w *watcher) maybeUpdateFile(path string, content []byte) (bool, error) {
 			if !fi.IsDir() {
 				return false, fmt.Errorf("error updating %s: %s is not a directory", path, p)
 			}
-		} else if err = os.MkdirAll(p, 0750); err != nil {
+		} else if err = mkdirAll(p, w.rootOwner, w.rootGroup, w.rootMask); err != nil {
 			return false, fmt.Errorf("error updating %s: can't create directory %s: %s", path, p, err)
 		}
 	}
 	if f, err := ioutil.TempFile(p, ".temp*"); err != nil {
 		return false, fmt.Errorf("error updating %s: %s", path, err)
 	} else if _, err = f.Write(content); err != nil {
+		_ = syscall.Unlink(f.Name())
 		return false, fmt.Errorf("error updating %s: %s", path, err)
 	} else if err = f.Close(); err != nil {
+		_ = syscall.Unlink(f.Name())
 		return false, fmt.Errorf("error updating %s: %s", path, err)
-	} else if err = os.Rename(f.Name(), path); err != nil {
-		return false, fmt.Errorf("error updating %s: %s", path, err)
+	} else {
+		if err = os.Chmod(f.Name(), os.FileMode(w.rootMask)); err != nil {
+			_ = syscall.Unlink(f.Name())
+			return false, fmt.Errorf("error setting permissions on file %s: %s", path, err)
+		}
+		if w.rootOwner >= 0 {
+			if err = os.Chown(f.Name(), w.rootOwner, w.rootGroup); err != nil {
+				_ = syscall.Unlink(f.Name())
+				return false, fmt.Errorf("error setting ownership on file %s: %s", path, err)
+			}
+		}
+		if err = os.Rename(f.Name(), path); err != nil {
+			_ = syscall.Unlink(f.Name())
+			return false, fmt.Errorf("error updating %s: %s", path, err)
+		}
 	}
 	return true, nil
 }
@@ -207,6 +276,85 @@ func (w *watcher) run(c *clientv3.Client, wg *sync.WaitGroup) {
 	}
 }
 
+func parseRoot(arg string) (root string, owner, group, umask int, err error) {
+	args := strings.Split(arg, ":")
+	owner, group, umask = -1, -1, 0644
+	var uid, gid string
+	switch len(args) {
+	case 4:
+		if len(args[3]) > 0 {
+			if i, e := strconv.ParseInt(args[3], 8, 8); e != nil {
+				err = fmt.Errorf("invalid file umask: %s", e)
+				return
+			} else {
+				umask = int(i)
+			}
+		}
+		fallthrough
+	case 3:
+		if args[2] != "" {
+			if grp, e := user.LookupGroup(args[2]); e == nil {
+				gid = grp.Gid
+			} else if grp, err = user.LookupGroupId(args[2]); e == nil {
+				gid = grp.Gid
+			} else {
+				err = fmt.Errorf("no group %s found", args[2])
+				return
+			}
+		}
+		fallthrough
+	case 2:
+		if args[1] != "" {
+			if usr, e := user.Lookup(args[1]); e == nil {
+				uid = usr.Gid
+				if gid == "" {
+					gid = usr.Gid
+				}
+			} else if usr, e = user.LookupId(args[1]); e == nil {
+				uid = usr.Gid
+				if gid == "" {
+					gid = usr.Gid
+				}
+			} else {
+				err = fmt.Errorf("no user %s found", args[1])
+				return
+			}
+		} else {
+			if usr, e := user.Current(); e != nil {
+				err = e
+				return
+			} else {
+				uid = usr.Uid
+				if gid == "" {
+					gid = usr.Gid
+				}
+			}
+		}
+		fallthrough
+	case 1:
+		root = args[0]
+	default:
+		err = fmt.Errorf("invalid root string (must be root[:owner[:group[:umask]]]): %s", arg)
+	}
+	if gid != "" {
+		if i, e := strconv.ParseInt(gid, 10, 64); e != nil {
+			err = fmt.Errorf("user.LookupGroup returned invalid group id: %s", gid)
+			return
+		} else {
+			group = int(i)
+		}
+	}
+	if uid != "" {
+		if i, e := strconv.ParseInt(uid, 10, 64); e != nil {
+			err = fmt.Errorf("user.LookupUser returned invalid group id: %s", uid)
+			return
+		} else {
+			owner = int(i)
+		}
+	}
+	return
+}
+
 func watchCommandFunc(cmd *cobra.Command, args []string) error {
 	var watchers []*watcher
 	for len(args) > 0 {
@@ -223,10 +371,17 @@ func watchCommandFunc(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("error finding command %s: %s", args[2], err)
 		}
+		root, owner, group, umask, err := parseRoot(args[1])
+		if err != nil {
+			return err
+		}
 		watcher := &watcher{
-			prefix: filepath.Join("/", watchPrefix, args[0]),
-			root:   args[1],
-			cmd:    cmd,
+			prefix:    filepath.Join("/", watchPrefix, args[0]),
+			root:      root,
+			rootOwner: owner,
+			rootGroup: group,
+			rootMask:  umask,
+			cmd:       cmd,
 		}
 		watchers = append(watchers, watcher)
 		for i := 3; i < len(args); i++ {
