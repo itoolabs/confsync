@@ -79,6 +79,16 @@ func (w *watcher) runCmd() {
 	}
 }
 
+func keyRelPath(prefix string, key string) (string, bool) {
+	if key == prefix {
+		return filepath.Base(key), true
+	} else if rel, err := filepath.Rel(prefix, key); err != nil || strings.HasPrefix(rel, "../") || filepath.Base(rel) == ".hash" {
+		return "", false
+	} else {
+		return rel, true
+	}
+}
+
 func (w *watcher) initialSync(c *clientv3.Client) int {
 	resp, err := c.Get(clientv3.WithRequireLeader(context.Background()), w.prefix, clientv3.WithPrefix())
 	if err != nil {
@@ -87,17 +97,15 @@ func (w *watcher) initialSync(c *clientv3.Client) int {
 	}
 	cnt := 0
 	for _, kv := range resp.Kvs {
-		key := strings.TrimPrefix(string(kv.Key), w.prefix)
-		if path.Base(key) == ".hash" {
-			continue
-		}
-		fn := filepath.Join(w.root, key)
-		if data, err := snappy.Decode(nil, kv.Value); err != nil {
-			fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
-		} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to synchronize file %s: %s\n", fn, err)
-		} else if updated {
-			cnt++
+		if key, ok := keyRelPath(w.prefix, string(kv.Key)); ok {
+			fn := filepath.Join(w.root, key)
+			if data, err := snappy.Decode(nil, kv.Value); err != nil {
+				fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
+			} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to synchronize file %s: %s\n", fn, err)
+			} else if updated {
+				cnt++
+			}
 		}
 	}
 	return cnt
@@ -163,35 +171,33 @@ func (w *watcher) run(c *clientv3.Client, wg *sync.WaitGroup) {
 		}
 		cnt := 0
 		for _, ev := range resp.Events {
-			key := strings.TrimPrefix(string(ev.Kv.Key), w.prefix)
-			if path.Base(key) == ".hash" {
-				continue
-			}
-			fn := path.Join(w.root, key)
-			if ev.Type == clientv3.EventTypeDelete {
-				if err := syscall.Unlink(fn); err != nil {
-					fmt.Fprintf(os.Stderr, "error removing file %s: %s\n", fn, err)
-				} else {
-					fmt.Fprintf(os.Stdout, "removed %s\n", fn)
-					d := fn
-					for {
-						d = filepath.Dir(d)
-						if d == w.root {
-							break
-						} else if removed, err := maybeRemoveDir(d); err != nil {
-							fmt.Fprintln(os.Stderr, err.Error())
-						} else if removed {
-							fmt.Fprintf(os.Stdout, "removed %s/\n", d)
+			if key, ok := keyRelPath(w.prefix, string(ev.Kv.Key)); ok {
+				fn := path.Join(w.root, key)
+				if ev.Type == clientv3.EventTypeDelete {
+					if err := syscall.Unlink(fn); err != nil {
+						fmt.Fprintf(os.Stderr, "error removing file %s: %s\n", fn, err)
+					} else {
+						fmt.Fprintf(os.Stdout, "removed %s\n", fn)
+						d := fn
+						for {
+							d = filepath.Dir(d)
+							if d == w.root {
+								break
+							} else if removed, err := maybeRemoveDir(d); err != nil {
+								fmt.Fprintln(os.Stderr, err.Error())
+							} else if removed {
+								fmt.Fprintf(os.Stdout, "removed %s/\n", d)
+							}
 						}
 					}
-				}
-			} else if ev.Type == clientv3.EventTypePut {
-				if data, err := snappy.Decode(nil, ev.Kv.Value); err != nil {
-					fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
-				} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
-					fmt.Fprintln(os.Stderr, err.Error())
-				} else if updated {
-					cnt++
+				} else if ev.Type == clientv3.EventTypePut {
+					if data, err := snappy.Decode(nil, ev.Kv.Value); err != nil {
+						fmt.Fprintf(os.Stderr, "error decompressing file %s content, skipping: %s", fn, err)
+					} else if updated, err := w.maybeUpdateFile(fn, data); err != nil {
+						fmt.Fprintln(os.Stderr, err.Error())
+					} else if updated {
+						cnt++
+					}
 				}
 			}
 		}
