@@ -211,6 +211,9 @@ func updateTreeRecursively(c clientv3.KV, prefix, root string) error {
 		}
 	}
 	if err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if info == nil {
+			return fmt.Errorf("%s does not exist", p)
+		}
 		if info.IsDir() {
 			if info.Name() == ".git" {
 				return filepath.SkipDir
