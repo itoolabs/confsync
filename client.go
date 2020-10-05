@@ -4,12 +4,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
+
 	"github.com/bgentry/speakeasy"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/pkg/srv"
 	"go.etcd.io/etcd/pkg/transport"
-	"os"
-	"strings"
 )
 
 func mustClient() *clientv3.Client {
@@ -17,7 +18,12 @@ func mustClient() *clientv3.Client {
 	if len(globals.endpoints) > 0 {
 		eps = globals.endpoints
 	} else if globals.serviceName != "" {
-		srvrs, err := srv.GetClient("etcd-client", globals.serviceName)
+		var domain string
+		if parts := strings.Split(globals.serviceName, "."); len(parts) > 0 {
+			domain = globals.serviceName[len(parts[0])+1:]
+			globals.serviceName = parts[0]
+		}
+		srvrs, err := srv.GetClient("etcd-client", domain, globals.serviceName)
 		if err != nil {
 			fail(err)
 		}

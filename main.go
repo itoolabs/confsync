@@ -2,15 +2,15 @@ package main
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"go.etcd.io/etcd/client"
-	"go.etcd.io/etcd/clientv3"
-	"google.golang.org/grpc/grpclog"
 	"io/ioutil"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"go.etcd.io/etcd/clientv3"
+	"google.golang.org/grpc/grpclog"
 )
 
 const (
@@ -83,9 +83,6 @@ func init() {
 
 func fail(err error) {
 	_, _ = fmt.Fprintln(os.Stderr, "Error:", err)
-	if cerr, ok := err.(*client.ClusterError); ok {
-		_, _ = fmt.Fprintln(os.Stderr, cerr.Detail())
-	}
 	os.Exit(1)
 }
 
